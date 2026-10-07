@@ -51,3 +51,11 @@ def test_draw_pixels_offcanvas_is_ignored():
         {"x": 2, "y": 2, "color": "#FF0000"},
     ])))
     assert _rgba(run(pixel_read.get_pixel_color(path, 2, 2))) == (255, 0, 0, 255)
+
+
+def test_draw_pixels_at_outside_trimmed_cel():
+    path = _trimmed_canvas("at_pixels")
+    ok(run(drawing.draw_pixels_at(path, "Layer 1", 1,
+                                  [{"x": 0, "y": 0, "color": "#FF0000"}], True)))
+    assert _rgba(run(pixel_read.get_pixel_color(path, 0, 0))) == (255, 0, 0, 255)
+    assert _rgba(run(pixel_read.get_pixel_color(path, 8, 8))) == (51, 102, 255, 255)

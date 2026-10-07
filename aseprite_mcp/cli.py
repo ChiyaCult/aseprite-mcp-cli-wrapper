@@ -20,6 +20,7 @@ from . import mcp
 from .tools import *  # noqa: F401,F403  registers all tools on `mcp`
 
 MAC_ASEPRITE = "/Applications/Aseprite.app/Contents/MacOS/aseprite"
+FAILURE_PREFIXES = ("Failed", "ERROR", "Error", "Invalid", "Script failed")
 
 
 def _tools():
@@ -37,6 +38,8 @@ def _type_name(schema):
     t = schema.get("type", "any")
     if t == "array":
         return f"json-array of {schema.get('items', {}).get('type', 'any')}"
+    if t == "object":
+        return "json-object"
     return t
 
 
@@ -169,7 +172,12 @@ def main(argv=None):
     except Exception as e:  # report every failure as a short message for the LLM
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    print(result if isinstance(result, str) else json.dumps(result, indent=2, default=str))
+    text = result if isinstance(result, str) else json.dumps(result, indent=2, default=str)
+    # Tools report failures as plain strings; turn them into a non-zero exit.
+    if text.startswith(FAILURE_PREFIXES) or (text.startswith("File ") and text.endswith("not found")):
+        print(f"Error: {text}", file=sys.stderr)
+        return 1
+    print(text)
     return 0
 
 

@@ -355,21 +355,18 @@ async def draw_pixels_at(
     if idx < 1 or idx > #spr.frames then print("ERROR:Frame index out of range") return end
 
     {FIND_LAYER}
+    {NORMALIZE_CEL}
+    {PSET}
     local target = find_layer(spr, "{safe_layer_name}")
     if not target then print("ERROR:Layer not found") return end
 
     app.transaction(function()
         app.activeLayer = target
         app.activeFrame = spr.frames[idx]
-        local cel = target:cel(spr.frames[idx])
-        if not cel and {create_flag} then
-            local img = Image(spr.width, spr.height, spr.colorMode)
-            cel = spr:newCel(target, spr.frames[idx], img, Point(0, 0))
-        end
+        -- Canvas-sized cel at (0,0): pixels outside a trimmed cel are kept.
+        local cel = normalize_cel(spr, target, spr.frames[idx], {create_flag})
         if not cel then return end
         local img = cel.image
-        local cox = cel.position.x
-        local coy = cel.position.y
     """
     for pixel in pixels:
         x = pixel.get("x", 0)
@@ -379,7 +376,7 @@ async def draw_pixels_at(
             return f"Invalid color value: {pixel.get('color')}"
         r, g, b, a = rgb
         script += f"""
-        img:putPixel({x} - cox, {y} - coy, Color({r}, {g}, {b}, {a}))
+        pset(img, {x}, {y}, Color({r}, {g}, {b}, {a}))
         """
 
     script += """
@@ -1113,3 +1110,111 @@ async def draw_ellipse_at(
     if success:
         return f"Ellipse drawn on '{layer_name}' frame {frame_index} in {filename}"
     return f"Failed to draw ellipse: {output}"
+
+
+# Characters that leave a grid cell untouched (transparent).
+_GRID_SKIP = {".", " "}
+
+
+@mcp.tool()
+async def draw_grid(
+    filename: str,
+    rows: List[str],
+    palette: Dict[str, str],
+    x: int = 0,
+    y: int = 0,
+    layer_name: str = "",
+    frame_index: int = 1,
+) -> str:
+    """Draw pixel art from text rows: one character per pixel, mapped through a palette.
+
+    Best way to draw a whole sprite or figure in one call. Each string in
+    `rows` is one pixel row from top to bottom; each character is one pixel.
+    "." and " " are skipped (left unchanged/transparent). Existing pixels
+    elsewhere are kept.
+
+    Example (5x3 at the top-left corner):
+        rows = [".KKK.", "KSSSK", ".K.K."]
+        palette = {"K": "#222034", "S": "#d9a066"}
+
+    Args:
+        filename: Name of the Aseprite file to modify
+        rows: List of strings, one per pixel row (top to bottom)
+        palette: Map of single character -> hex color ("#RRGGBB" or "#RRGGBBAA")
+        x: X offset of the grid's top-left corner on the canvas (default: 0)
+        y: Y offset of the grid's top-left corner on the canvas (default: 0)
+        layer_name: Layer to draw on; empty uses the active layer (default: "")
+        frame_index: Frame index starting at 1, used with layer_name (default: 1)
+    """
+    if not os.path.exists(filename):
+        return f"File {filename} not found"
+
+    colors: Dict[str, tuple[int, int, int, int]] = {}
+    for key, value in palette.items():
+        if len(key) != 1:
+            return f"Invalid palette key {key!r}: keys must be single characters"
+        rgb = _parse_hex_color(value)
+        if rgb is None:
+            return f"Invalid color value for {key!r}: {value}"
+        colors[key] = rgb
+
+    unknown = sorted({ch for row in rows for ch in row} - colors.keys() - _GRID_SKIP)
+    if unknown:
+        return (f"Invalid characters in rows: {', '.join(repr(c) for c in unknown)}. "
+                f"Add them to the palette or use '.' for transparent.")
+
+    # One Lua table entry per painted pixel: {x, y, r, g, b, a}.
+    cells = [
+        f"{{{x + cx},{y + cy},{','.join(map(str, colors[ch]))}}}"
+        for cy, row in enumerate(rows)
+        for cx, ch in enumerate(row)
+        if ch not in _GRID_SKIP
+    ]
+    if not cells:
+        # An all-"." grid is almost always a model filling in a blank template.
+        return ("Invalid grid: every cell is transparent, nothing would be drawn. "
+                "Replace '.' with palette characters where the picture should be.")
+
+    if layer_name:
+        target = f"""
+        local idx = {frame_index}
+        if idx < 1 or idx > #spr.frames then print("ERROR:Frame index out of range") return end
+        local layer = find_layer(spr, "{lua_escape(layer_name)}")
+        if not layer then print("ERROR:Layer not found") return end
+        local frame = spr.frames[idx]
+        """
+    else:
+        target = """
+        local layer = app.activeLayer or spr.layers[1]
+        local frame = app.activeFrame or spr.frames[1]
+        """
+
+    script = f"""
+    local spr = app.activeSprite
+    if not spr then print("ERROR:No active sprite") return end
+
+    {FIND_LAYER}
+    {NORMALIZE_CEL}
+    {PSET}
+    {target}
+
+    local cells = {{{','.join(cells)}}}
+
+    app.transaction(function()
+        local cel = normalize_cel(spr, layer, frame, true)
+        if not cel then print("ERROR:Could not create cel") return end
+        local img = cel.image
+        for _, c in ipairs(cells) do
+            pset(img, c[1], c[2], Color(c[3], c[4], c[5], c[6]))
+        end
+    end)
+
+    spr:saveAs(spr.filename)
+    print("OK")
+    """
+
+    success, output = AsepriteCommand.execute_lua_script_checked(script, filename)
+    if success:
+        width = max((len(r) for r in rows), default=0)
+        return f"Grid {width}x{len(rows)} drawn ({len(cells)} pixels) in {filename}"
+    return f"Failed to draw grid: {output}"
