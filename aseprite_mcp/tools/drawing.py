@@ -24,30 +24,28 @@ async def draw_pixels(filename: str, pixels: List[Dict[str, Any]]) -> str:
     if not os.path.exists(filename):
         return f"File {filename} not found"
 
-    script = """
+    script = f"""
     local spr = app.activeSprite
     if not spr then print("ERROR:No active sprite") return end
 
+    {NORMALIZE_CEL}
+    {PSET}
+
     app.transaction(function()
-        local cel = app.activeCel
+        -- normalize_cel grows a trimmed cel to the full canvas, so pixels
+        -- outside the cel's previous bounds are no longer dropped.
+        local layer = app.activeLayer or spr.layers[1]
+        local frame = app.activeFrame or spr.frames[1]
+        local cel = normalize_cel(spr, layer, frame, true)
         if not cel then
-            -- If no active cel, create one
-            app.activeLayer = spr.layers[1]
-            app.activeFrame = spr.frames[1]
-            cel = app.activeCel
-            if not cel then
-                print("ERROR:No active cel and couldn't create one") return
-            end
+            print("ERROR:No active cel and couldn't create one") return
         end
 
         local img = cel.image
-        local cox = cel.position.x
-        local coy = cel.position.y
     """
 
-    # Add pixel drawing commands. Coordinates are sprite-global; we
-    # offset into cel-local space because cel.image:putPixel uses
-    # cel-local coordinates.
+    # Coordinates are sprite-global; the normalized cel sits at (0,0)
+    # and pset() skips anything outside the canvas.
     for pixel in pixels:
         x = pixel.get("x", 0)
         y = pixel.get("y", 0)
@@ -57,7 +55,7 @@ async def draw_pixels(filename: str, pixels: List[Dict[str, Any]]) -> str:
         r, g, b, a = rgb
 
         script += f"""
-        img:putPixel({x} - cox, {y} - coy, Color({r}, {g}, {b}, {a}))
+        pset(img, {x}, {y}, Color({r}, {g}, {b}, {a}))
         """
 
     script += """
@@ -99,11 +97,14 @@ async def draw_line(filename: str, x1: int, y1: int, x2: int, y2: int, color: st
     local spr = app.activeSprite
     if not spr then print("ERROR:No active sprite") return end
 
+    {NORMALIZE_CEL}
+    {PSET}
+
     local function put_thick(img, x, y, color, size)
         local r = math.max(0, math.floor(size / 2))
         for oy = -r, r do
             for ox = -r, r do
-                img:putPixel(x + ox, y + oy, color)
+                pset(img, x + ox, y + oy, color)
             end
         end
     end
@@ -118,7 +119,7 @@ async def draw_line(filename: str, x1: int, y1: int, x2: int, y2: int, color: st
             if size > 1 then
                 put_thick(img, x0, y0, color, size)
             else
-                img:putPixel(x0, y0, color)
+                pset(img, x0, y0, color)
             end
             if x0 == x1 and y0 == y1 then break end
             local e2 = 2 * err
@@ -128,23 +129,16 @@ async def draw_line(filename: str, x1: int, y1: int, x2: int, y2: int, color: st
     end
 
     app.transaction(function()
-        local cel = app.activeCel
+        -- Points are sprite-global; normalize_cel anchors the cel at (0,0)
+        -- canvas-sized, so the line is not clipped to a trimmed cel.
+        local layer = app.activeLayer or spr.layers[1]
+        local frame = app.activeFrame or spr.frames[1]
+        local cel = normalize_cel(spr, layer, frame, true)
         if not cel then
-            app.activeLayer = spr.layers[1]
-            app.activeFrame = spr.frames[1]
-            cel = app.activeCel
-            if not cel then
-                print("ERROR:No active cel and couldn't create one") return
-            end
+            print("ERROR:No active cel and couldn't create one") return
         end
-        local img = cel.image
-        local cox = cel.position.x
-        local coy = cel.position.y
         local color = Color({r}, {g}, {b}, {a})
-        -- Translate sprite-global args into cel-local space so the
-        -- inner Bresenham/putPixel helpers do not need to know about
-        -- cel.position.
-        draw_line(img, {x1} - cox, {y1} - coy, {x2} - cox, {y2} - coy, color, {thickness})
+        draw_line(cel.image, {x1}, {y1}, {x2}, {y2}, color, {thickness})
     end)
 
     spr:saveAs(spr.filename)
